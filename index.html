@@ -1,17 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>nkt-train — Seat Availability Simulator</title>
+  <style>
+    /* Simple styling for clarity */
+    body { font-family: system-ui, -apple-system, Roboto, "Segoe UI", Arial; margin: 20px; color:#111; background:#f7f9fb; }
+    .container { max-width:900px; margin:0 auto; background:#fff; padding:20px; border-radius:8px; box-shadow:0 6px 18px rgba(12,20,40,0.06); }
+    h1 { margin:0 0 8px; font-size:22px; }
+    p.lead { margin:0 0 18px; color:#475569; }
+    label { display:block; margin:12px 0 6px; font-weight:600; }
+    input, select { width:100%; padding:10px 12px; border:1px solid #d1d5db; border-radius:6px; font-size:15px; }
+    .row { display:flex; gap:12px; }
+    .col { flex:1; }
+    button { margin-top:14px; padding:10px 14px; background:#0366d6; color:#fff; border:0; border-radius:6px; cursor:pointer; font-weight:600; }
+    button.secondary { background:#6b7280; }
+    .result { margin-top:18px; padding:14px; border-radius:8px; background:#f1f5f9; }
+    table { width:100%; border-collapse:collapse; margin-top:12px; }
+    th,td { text-align:left; padding:8px 10px; border-bottom:1px solid #e6eef8; }
+    th { background:#f8fafc; font-weight:700; font-size:13px; color:#0f172a; }
+    .small { font-size:13px; color:#475569; }
+    .muted { color:#6b7280; font-size:13px; }
+    .share { margin-top:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .chip { background:#eef2ff; color:#3730a3; padding:6px 10px; border-radius:999px; font-weight:600; }
+    footer { margin-top:18px; font-size:13px; color:#6b7280; }
+    pre { background:#0f172a;color:#fff;padding:10px;border-radius:6px;overflow:auto }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>nkt-train — Seat Availability Simulator</h1>
+    <p class="lead">Enter train details below. This app simulates seat availability locally (no IRCTC/API required). Save or share the HTML file to allow others to use it.</p>
 
-<div class="row">
-  <label style="flex:1 1 220px;">
-    Boarding Station (code)
-    <input id="source" name="source" placeholder="NDLS">
-  </label>
-  <label style="flex:1 1 220px;">
-    Deboarding Station (code)
-    <input id="dest" name="dest" placeholder="BCT">
-  </label>
-</div>
+    <label>Train number</label>
+    <input id="trainNumber" placeholder="e.g., 12345" />
 
-<div style="margin-top:12px;">
-  <button type="submit">Check Availability</button>
-  <button type="button" id="randomize">Fill sample data</button>
-  <button type="button" id="reset">Reset</button>
-</div>
+    <div class="row">
+      <div class="col">
+        <label>Train start date</label>
+        <input id="startDate" type="date" />
+      </div>
+      <div class="col">
+        <label>Boarding station (code or name)</label>
+        <input id="boarding" placeholder="e.g., NDLS or New Delhi" />
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col">
+        <label>Deboarding station (code or name)</label>
+        <input id="deboarding" placeholder="e.g., BCT or Mumbai Cst" />
+      </div>
+      <div class="col">
+        <label>Coach type</label>
+        <select id="coachType">
+          <option value="SL">Sleeper (SL)</option>
+          <option value="3A">3AC (3A)</option>
+          <option value="2A">2AC (2A)</option>
+          <option value="3E">3E (3E)</option>
+          <option value="CC">CC</option>
+          <option value="1A">1AC (1A)</option>
+        </select>
+      </div>
+    </div>
+
+    <label>Optional: Passenger quota</label>
+    <input id="quota" placeholder="e.g., GN, TQ, LD (optional)" />
+
+    <div style="display:flex;gap:10px;">
+      <button id="checkBtn">Check Availability</button>
+      <button id="shareBtn" class="secondary">Copy shareable link</button>
+    </div>
+
+    <div id="result" class="result" style="display:none;">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
+        <div>
+          <div class="chip" id="summaryChip">Summary</div>
+          <div class="small" id="summaryText" style="margin-top:8px"></div>
+        </div>
+        <div class="muted" id="queryId">Query ID: —</div>
+      </div>
+
+      <table id="availTable" aria-live="polite">
+        <thead>
+          <tr><th>Coach</th><th>Availability</th><th>Seats left</th><th>Next change (sim)</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <div class="share">
+        <button id="downloadBtn">Download result (JSON)</button>
+        <button id="resetBtn" class="secondary">Reset form</button>
+        <div class="muted" id="note">Simulated results, deterministic for same inputs.</div>
+      </div>
+
+      <pre id="rawJson" style="display:none"></pre>
+    </div>
+
+    <footer>Instructions: Fill fields → Check Availability → Copy link to share same inputs with others.</footer>
+  </div>
+
+<script>
+/*
+  Seat Availability Simulator (single-file, no external API).
+  Behavior:
+  - Deterministic pseudo-random results derived from inputs (so same inputs -> same output).
+  - Produces availability states: AVAILABLE, RAC, WL (waitlist), NOT AVAILABLE.
+  - Suggests number of seats left and a simulated "next change" time.
+  - "Copy shareable link" writes current inputs into URL fragment so you can share a link that
+    will recreate the same query when someone opens it. No server involved.
+*/
+
+/* --- Utilities --- */
+function hashToNumber(str) {
+  // Simple deterministic hash -> positive integer
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h;
+}
+function pad(n){return n<10? '0'+n: n;}
+function formatDateISO(d){
+  return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+}
+
+/* --- Core simulator --- */
+function simulateAvailability(inputs) {
+  // Create deterministic seed from concatenated inputs
+  const seed = hashToNumber(
+    (inputs.trainNumber||'') + '|' +
+    (inputs.startDate||'') + '|' +
+    (inputs.boarding||'') + '|' +
+    (inputs.deboarding||'') + '|' +
+    (inputs.coachType||'') + '|' +
+    (inputs.quota||'')
+  );
+
+  // pseudo-random generator (xorshift-ish)
+  function rng() {
+    let x = seed;
+    return function() {
+      x ^= x << 13;
+      x ^= x >>> 17;
+      x ^= x << 5;
+      // convert to positive 0..1
+      return ((x >>> 0) % 1000000) / 1000000;
+    };
+  }
+  const rnd = rng();
+
+  // Decide number of coaches to simulate for display (1-3)
+  const coachCount = 1 + Math.floor(rnd()*3);
+  const coachTypesToShow = [];
+  const main = inputs.coachType || 'SL';
+  coachTypesToShow.push(main);
+  const otherTypes = ['SL','3E','3A','2A','1A','CC'].filter(c=>c!==main);
+  for (let i=0;i<coachCount-1;i++){
+    coachTypesToShow.push(otherTypes[(Math.floor(rnd()*otherTypes.length))]);
+  }
+
+  const rows = coachTypesToShow.map((ctype, idx) => {
+    // availability categories weighted by seed and simple rules
+    const base = Math.floor(rnd()*100);
+    // If travel date is near (within 3 days) -> busier
+    const today = new Date();
+    let busyFactor = 0;
+    if (inputs.startDate) {
+      const sd = new Date(inputs.startDate);
+      const diffDays = Math.round((sd - new Date(today.getFullYear(), today.getMonth(), today.getDate()))/(1000*60*60*24));
+      if (!isNaN(diffDays)) {
+        if (diffDays <= 3) busyFactor = 30;
+        else if (diffDays <= 14) busyFactor = 10;
+      }
+    }
+    // coach popularity rough mapping
+    const popularity = { '1A':10, '2A':25, '3A':40, '3E':35, 'SL':60, 'CC':45 }[ctype] || 40;
+    const score = (base + popularity + busyFactor + (seed % 50)) % 200;
+
+    let status, seats;
+    if (score > 150) { status = 'AVAILABLE'; seats = 5 + Math.floor(rnd()*80); }
+    else if (score > 110) { status = 'RAC'; seats = 1 + Math.floor(rnd()*12); }
+    else if (score > 70) { status = 'WL'; seats = 1 + Math.floor(rnd()*60); }
+    else { status = 'NOT AVAILABLE'; seats = 0; }
+
+    // Next change estimate (hours): deterministic
+    const nextChangeHours = 1 + Math.floor((seed + idx*17) % 72);
+    return {
+      coach: ctype,
+      availability: status,
+      seatsLeft: seats,
+      nextChange: nextChangeHours + ' hrs'
+    };
+  });
+
+  // Compose summary
+  const best = rows.find(r=>r.availability==='AVAILABLE') || rows[0];
+  const queryId = 'Q' + (hashToNumber(JSON.stringify(inputs)) % 1000000);
+  return { inputs, rows, best, queryId, timestamp: (new Date()).toISOString() };
+}
+
+/* --- DOM and interaction --- */
+const trainNumber = document.getElementById('trainNumber');
+const startDate = document.getElementById('startDate');
+const boarding = document.getElementById('boarding');
+const deboarding = document.getElementById('deboarding');
+const coachType = document.getElementById('coachType');
+const quota = document.getElementById('quota');
+
+const checkBtn = document.getElementById('checkBtn');
+const shareBtn = document.getElementById('shareBtn');
+const resultEl = document.getElementById('result');
+const summaryText = document.getElementById('summaryText');
+const queryIdEl = document.getElementById('queryId');
+const availTableBody = document.querySelector('#availTable tbody');
+const downloadBtn = document.getElementById('downloadBtn');
+const resetBtn = document.getElementById('resetBtn');
+const rawJson = document.getElementById('rawJson');
+
+function readInputs() {
+  return {
+    trainNumber: trainNumber.value.trim(),
+    startDate: startDate.value || '',
+    boarding: boarding.value.trim(),
+    deboarding: deboarding.value.trim(),
+    coachType: coachType.value,
+    quota: quota.value.trim()
+  };
+}
+
+function showResult(data) {
+  resultEl.style.display = 'block';
+  summaryText.innerHTML = '<strong>' + (data.best.coach) + '</strong> — <span class="muted">' + data.best.availability + '</span>';
+  queryIdEl.textContent = 'Query ID: ' + data.queryId;
+  availTableBody.innerHTML = '';
+  data.rows.forEach(r=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + r.coach + '</td><td>' + r.availability + '</td><td>' + r.seatsLeft + '</td><td>' + r.nextChange + '</td>';
+    availTableBody.appendChild(tr);
+  });
+  rawJson.style.display = 'none';
+  rawJson.textContent = JSON.stringify(data, null, 2);
+}
+
+checkBtn.addEventListener('click', () => {
+  const inputs = readInputs();
+  // Reasonable defaults if user left fields empty (hand-holding)
+  if (!inputs.trainNumber) inputs.trainNumber = '00000';
+  if (!inputs.startDate) {
+    // set to today by default
+    inputs.startDate = formatDateISO(new Date());
+    startDate.value = inputs.startDate;
+  }
+  if (!inputs.boarding) inputs.boarding = 'UNKNOWN';
+  if (!inputs.deboarding) inputs.deboarding = 'UNKNOWN';
+  const data = simulateAvailability(inputs);
+  showResult(data);
+});
+
+resetBtn.addEventListener('click', () => {
+  trainNumber.value = '';
+  startDate.value = '';
+  boarding.value = '';
+  deboarding.value = '';
+  coachType.value = 'SL';
+  quota.value = '';
+  resultEl.style.display = 'none';
+});
+
+/* Shareable link via fragment (#) — includes inputs so no server call */
+function buildFragment(inputs) {
+  // encode as compact key=value pairs
+  const kv = [];
+  for (const k of Object.keys(inputs)) {
+    if (inputs[k]) kv.push(k + '=' + encodeURIComponent(inputs[k]));
+  }
+  return kv.join('&');
+}
+shareBtn.addEventListener('click', () => {
+  const inputs = readInputs();
+  const frag = buildFragment(inputs);
+  const url = location.origin + location.pathname + (frag ? ('#' + frag) : '');
+  navigator.clipboard?.writeText(url).then(()=> {
+    shareBtn.textContent = 'Link copied';
+    setTimeout(()=> shareBtn.textContent = 'Copy shareable link', 2000);
+  }).catch(()=> {
+    prompt('Copy this link:', url);
+  });
+});
+
+/* On page load, read fragment and prefill inputs */
+function parseFragment() {
+  const frag = location.hash.replace(/^#/, '');
+  if (!frag) return null;
+  const obj = {};
+  frag.split('&').forEach(part=>{
+    const [k,v] = part.split('=');
+    if (k) obj[k] = decodeURIComponent(v||'');
+  });
+  return obj;
+}
+window.addEventListener('load', ()=>{
+  const pre = parseFragment();
+  if (pre) {
+    trainNumber.value = pre.trainNumber || '';
+    startDate.value = pre.startDate || '';
+    boarding.value = pre.boarding || '';
+    deboarding.value = pre.deboarding || '';
+    coachType.value = pre.coachType || 'SL';
+    quota.value = pre.quota || '';
+    // Optionally auto-run simulation if fragment contains trainNumber
+    if (pre.trainNumber) checkBtn.click();
+  }
+});
+
+/* Download result JSON */
+downloadBtn.addEventListener('click', () => {
+  if (!rawJson.textContent) {
+    rawJson.style.display = 'block';
+    rawJson.textContent = '{}';
+  } else {
+    rawJson.style.display = rawJson.style.display === 'none' ? 'block' : 'none';
+  }
+  // Also provide file download of latest shown result
+  try {
+    const data = JSON.parse(rawJson.textContent || '{}');
+    const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'nkt-train-result.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch(e){
+    // no-op
+  }
+});
+</script>
